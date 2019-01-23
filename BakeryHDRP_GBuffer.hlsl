@@ -2,7 +2,7 @@
 #error SHADERPASS_is_not_correctly_define
 #endif
 
-#include "HDRP/ShaderPass/VertMesh.hlsl"
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/ShaderPass/VertMesh.hlsl"
 #include "BakeryHDRP.hlsl"
 
 PackedVaryingsType Vert(AttributesMesh inputMesh)
@@ -21,13 +21,12 @@ PackedVaryingsToPS VertTesselation(VaryingsToDS input)
     return PackVaryingsToPS(output);
 }
 
-#include "TessellationShare.hlsl"
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/ShaderPass/TessellationShare.hlsl"
 
 #endif // TESSELLATION_ON
 
 void Frag(  PackedVaryingsToPS packedInput,
             OUTPUT_GBUFFER(outGBuffer)
-            OUTPUT_GBUFFER_SHADOWMASK(outShadowMaskBuffer)
             #ifdef _DEPTHOFFSET_ON
             , out float outputDepth : SV_Depth
             #endif
@@ -36,39 +35,30 @@ void Frag(  PackedVaryingsToPS packedInput,
     FragInputs input = UnpackVaryingsMeshToFragInputs(packedInput.vmesh);
 
     // input.positionSS is SV_Position
-    PositionInputs posInput = GetPositionInput(input.positionSS.xy, _ScreenSize.zw, input.positionSS.z, input.positionSS.w, input.positionWS);
+    PositionInputs posInput = GetPositionInput(input.positionSS.xy, _ScreenSize.zw, input.positionSS.z, input.positionSS.w, input.positionRWS);
 
 #ifdef VARYINGS_NEED_POSITION_WS
-    float3 V = GetWorldSpaceNormalizeViewDir(input.positionWS);
+    float3 V = GetWorldSpaceNormalizeViewDir(input.positionRWS);
 #else
-    float3 V = 0; // Avoid the division by 0
+    // Unused
+    float3 V = float3(1.0, 1.0, 1.0); // Avoid the division by 0
 #endif
 
     SurfaceData surfaceData;
     BuiltinData builtinData;
     GetSurfaceAndBuiltinData(input, V, posInput, surfaceData, builtinData);
 
-#ifdef DEBUG_DISPLAY
-    ApplyDebugToSurfaceData(input.worldToTangent, surfaceData);
-#endif
-
-    BSDFData bsdfData = ConvertSurfaceDataToBSDFData(input.positionSS.xy, surfaceData);
-
-    PreLightData preLightData = GetPreLightData(V, posInput, bsdfData);
-
-    float3 bakeDiffuseLighting = GetBakedDiffuseLighting(surfaceData, builtinData, bsdfData, preLightData);
-
 #ifdef BAKERY_SH
     if (bakeryLightmapMode == BAKERYMODE_SH)
     {
         float3 indirectSpecular = 0;
-        BakerySH(bakeDiffuseLighting, indirectSpecular, input.texCoord1 * unity_LightmapST.xy + unity_LightmapST.zw, surfaceData.normalWS, 0, 0);
-        bakeDiffuseLighting = max(bakeDiffuseLighting * bsdfData.diffuseColor, 0);
+        BakerySH(builtinData.bakeDiffuseLighting, indirectSpecular, input.texCoord1 * unity_LightmapST.xy + unity_LightmapST.zw, surfaceData.normalWS, 0, 0);
+        builtinData.bakeDiffuseLighting = max(builtinData.bakeDiffuseLighting * surfaceData.baseColor, 0);
+        builtinData.backBakeDiffuseLighting = builtinData.bakeDiffuseLighting;
     }
 #endif
 
-    ENCODE_INTO_GBUFFER(surfaceData, bakeDiffuseLighting, posInput.positionSS, outGBuffer);
-    ENCODE_SHADOWMASK_INTO_GBUFFER(float4(builtinData.shadowMask0, builtinData.shadowMask1, builtinData.shadowMask2, builtinData.shadowMask3), outShadowMaskBuffer);
+    ENCODE_INTO_GBUFFER(surfaceData, builtinData, posInput.positionSS, outGBuffer);
 
 #ifdef _DEPTHOFFSET_ON
     outputDepth = posInput.deviceDepth;

@@ -2,7 +2,7 @@
 #error SHADERPASS_is_not_correctly_define
 #endif
 
-#include "HDRP/ShaderPass/VertMesh.hlsl"
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/ShaderPass/VertMesh.hlsl"
 #include "BakeryHDRP.hlsl"
 
 PackedVaryingsType Vert(AttributesMesh inputMesh)
@@ -21,7 +21,7 @@ PackedVaryingsToPS VertTesselation(VaryingsToDS input)
     return PackVaryingsToPS(output);
 }
 
-#include "TessellationShare.hlsl"
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/ShaderPass/TessellationShare.hlsl"
 
 #endif // TESSELLATION_ON
 
@@ -40,22 +40,24 @@ void Frag(PackedVaryingsToPS packedInput,
 {
     FragInputs input = UnpackVaryingsMeshToFragInputs(packedInput.vmesh);
 
+    uint2 tileIndex = uint2(input.positionSS.xy) / GetTileSize();
+#if defined(UNITY_SINGLE_PASS_STEREO)
+    tileIndex.x -= unity_StereoEyeIndex * _NumTileClusteredX;
+#endif
+
     // input.positionSS is SV_Position
-    PositionInputs posInput = GetPositionInput(input.positionSS.xy, _ScreenSize.zw, input.positionSS.z, input.positionSS.w, input.positionWS.xyz, uint2(input.positionSS.xy) / GetTileSize());
+    PositionInputs posInput = GetPositionInput_Stereo(input.positionSS.xy, _ScreenSize.zw, input.positionSS.z, input.positionSS.w, input.positionRWS.xyz, tileIndex, unity_StereoEyeIndex);
 
 #ifdef VARYINGS_NEED_POSITION_WS
-    float3 V = GetWorldSpaceNormalizeViewDir(input.positionWS);
+    float3 V = GetWorldSpaceNormalizeViewDir(input.positionRWS);
 #else
-    float3 V = 0; // Avoid the division by 0
+    // Unused
+    float3 V = float3(1.0, 1.0, 1.0); // Avoid the division by 0
 #endif
 
     SurfaceData surfaceData;
     BuiltinData builtinData;
     GetSurfaceAndBuiltinData(input, V, posInput, surfaceData, builtinData);
-
-#ifdef DEBUG_DISPLAY
-    ApplyDebugToSurfaceData(input.worldToTangent, surfaceData);
-#endif
 
     BSDFData bsdfData = ConvertSurfaceDataToBSDFData(input.positionSS.xy, surfaceData);
 
@@ -71,56 +73,6 @@ void Frag(PackedVaryingsToPS packedInput,
     ENCODE_INTO_SSSBUFFER(surfaceData, posInput.positionSS, outSSSBuffer);
     #endif
 
-    if (_DebugLightingMode != DEBUGLIGHTINGMODE_NONE || _DebugMipMapMode != DEBUGMIPMAPMODE_NONE)
-#endif
-    {
-#ifdef _SURFACE_TYPE_TRANSPARENT
-        uint featureFlags = LIGHT_FEATURE_MASK_FLAGS_TRANSPARENT;
-#else
-        uint featureFlags = LIGHT_FEATURE_MASK_FLAGS_OPAQUE;
-#endif
-        float3 diffuseLighting;
-        float3 specularLighting;
-        BakeLightingData bakeLightingData;
-        bakeLightingData.bakeDiffuseLighting = GetBakedDiffuseLighting(surfaceData, builtinData, bsdfData, preLightData);
-
-#ifdef BAKERY_SH
-    if (bakeryLightmapMode == BAKERYMODE_SH)
-    {
-        float3 indirectSpecular = 0;
-        BakerySH(bakeLightingData.bakeDiffuseLighting, indirectSpecular, input.texCoord1 * unity_LightmapST.xy + unity_LightmapST.zw, surfaceData.normalWS, 0, 0);
-        bakeLightingData.bakeDiffuseLighting = max(bakeLightingData.bakeDiffuseLighting * bsdfData.diffuseColor, 0);
-    }
-#endif
-
-#ifdef SHADOWS_SHADOWMASK
-        bakeLightingData.bakeShadowMask = float4(builtinData.shadowMask0, builtinData.shadowMask1, builtinData.shadowMask2, builtinData.shadowMask3);
-#endif
-        LightLoop(V, posInput, preLightData, bsdfData, bakeLightingData, featureFlags, diffuseLighting, specularLighting);
-
-#ifdef OUTPUT_SPLIT_LIGHTING
-        if (_EnableSubsurfaceScattering != 0 && ShouldOutputSplitLighting(bsdfData))
-        {
-            outColor = float4(specularLighting, 1.0);
-            outDiffuseLighting = float4(TagLightingForSSS(diffuseLighting), 1.0);
-        }
-        else
-        {
-            outColor = float4(diffuseLighting + specularLighting, 1.0);
-            outDiffuseLighting = 0;
-        }
-        ENCODE_INTO_SSSBUFFER(surfaceData, posInput.positionSS, outSSSBuffer);
-#else
-        outColor = ApplyBlendMode(diffuseLighting, specularLighting, builtinData.opacity);
-        outColor = EvaluateAtmosphericScattering(posInput, outColor);
-#endif
-    }
-
-#ifdef _DEPTHOFFSET_ON
-    outputDepth = posInput.deviceDepth;
-#endif
-
-#ifdef DEBUG_DISPLAY
     // Same code in ShaderPassForwardUnlit.shader
     if (_DebugViewMaterial != 0)
     {
@@ -142,5 +94,47 @@ void Frag(PackedVaryingsToPS packedInput,
 
         outColor = float4(result, 1.0);
     }
+    else
+#endif
+    {
+#ifdef _SURFACE_TYPE_TRANSPARENT
+        uint featureFlags = LIGHT_FEATURE_MASK_FLAGS_TRANSPARENT;
+#else
+        uint featureFlags = LIGHT_FEATURE_MASK_FLAGS_OPAQUE;
+#endif
+        float3 diffuseLighting;
+        float3 specularLighting;
+
+#ifdef BAKERY_SH
+    if (bakeryLightmapMode == BAKERYMODE_SH)
+    {
+        float3 indirectSpecular = 0;
+        BakerySH(builtinData.bakeDiffuseLighting, indirectSpecular, input.texCoord1 * unity_LightmapST.xy + unity_LightmapST.zw, surfaceData.normalWS, 0, 0);
+        builtinData.bakeDiffuseLighting = max(builtinData.bakeDiffuseLighting * surfaceData.baseColor, 0);
+    }
+#endif
+
+        LightLoop(V, posInput, preLightData, bsdfData, builtinData, featureFlags, diffuseLighting, specularLighting);
+
+#ifdef OUTPUT_SPLIT_LIGHTING
+        if (_EnableSubsurfaceScattering != 0 && ShouldOutputSplitLighting(bsdfData))
+        {
+            outColor = float4(specularLighting, 1.0);
+            outDiffuseLighting = float4(TagLightingForSSS(diffuseLighting), 1.0);
+        }
+        else
+        {
+            outColor = float4(diffuseLighting + specularLighting, 1.0);
+            outDiffuseLighting = 0;
+        }
+        ENCODE_INTO_SSSBUFFER(surfaceData, posInput.positionSS, outSSSBuffer);
+#else
+        outColor = ApplyBlendMode(diffuseLighting, specularLighting, builtinData.opacity);
+        outColor = EvaluateAtmosphericScattering(posInput, V, outColor);
+#endif
+    }
+
+#ifdef _DEPTHOFFSET_ON
+    outputDepth = posInput.deviceDepth;
 #endif
 }
